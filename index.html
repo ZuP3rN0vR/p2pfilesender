@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P File Share - GitHub Pages</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        .container {
+            margin-top: 50px;
+        }
+        .upload-section, .download-section {
+            border: 2px dashed #ccc;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 15px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #fileInfo {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f5f5f5;
+            border-radius: 5px;
+            display: none;
+        }
+        #codeDisplay {
+            font-size: 24px;
+            font-weight: bold;
+            letter-spacing: 5px;
+            margin: 20px 0;
+            color: #333;
+        }
+        input[type="text"] {
+            padding: 10px;
+            font-size: 16px;
+            width: 200px;
+            text-align: center;
+            letter-spacing: 3px;
+        }
+        .hidden {
+            display: none;
+        }
+        .status {
+            margin-top: 20px;
+            font-style: italic;
+            color: #666;
+        }
+        #downloadLink {
+            display: none;
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #e9f7ef;
+            border-radius: 5px;
+            text-decoration: none;
+            color: #2e7d32;
+            font-weight: bold;
+        }
+        .progress-container {
+            width: 100%;
+            background-color: #f1f1f1;
+            border-radius: 5px;
+            margin-top: 20px;
+            display: none;
+        }
+        #progressBar {
+            width: 0%;
+            height: 30px;
+            background-color: #4CAF50;
+            border-radius: 5px;
+            text-align: center;
+            line-height: 30px;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <h1>P2P File Share</h1>
+    <p>Share files directly between devices using GitHub Pages</p>
+    
+    <div class="container">
+        <div class="upload-section" id="uploadSection">
+            <h2>Send File</h2>
+            <input type="file" id="fileUpload">
+            <div id="fileInfo"></div>
+            <button id="generateCodeBtn" disabled>Generate Share Code</button>
+            <div id="codeDisplay" class="hidden"></div>
+            <div class="progress-container" id="sendProgressContainer">
+                <div id="sendProgressBar" class="progress-bar">0%</div>
+            </div>
+            <div class="status" id="uploadStatus">Select a file to begin</div>
+        </div>
+        
+        <div class="download-section">
+            <h2>Receive File</h2>
+            <p>Enter the 6-digit code to receive the file:</p>
+            <input type="text" id="codeInput" maxlength="6" placeholder="123456">
+            <button id="connectBtn" disabled>Connect</button>
+            <div class="progress-container" id="receiveProgressContainer">
+                <div id="receiveProgressBar" class="progress-bar">0%</div>
+            </div>
+            <div class="status" id="downloadStatus"></div>
+            <a id="downloadLink" download>Download File</a>
+        </div>
+    </div>
+
+    <!-- PeerJS library for WebRTC signaling -->
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    
+    <script>
+        // Configuration
+        const chunkSize = 16384; // 16KB chunks
+        let peer;
+        let conn;
+        let fileToSend;
+        let fileReader;
+        let currentChunk = 0;
+        let totalChunks = 0;
+        let fileMetaData = {};
+        let receivedChunks = [];
+        let receivingFileSize = 0;
+        let receivedSize = 0;
+
+        // DOM elements
+        const fileUpload = document.getElementById('fileUpload');
+        const fileInfo = document.getElementById('fileInfo');
+        const generateCodeBtn = document.getElementById('generateCodeBtn');
+        const codeDisplay = document.getElementById('codeDisplay');
+        const uploadStatus = document.getElementById('uploadStatus');
+        const codeInput = document.getElementById('codeInput');
+        const connectBtn = document.getElementById('connectBtn');
+        const downloadStatus = document.getElementById('downloadStatus');
+        const downloadLink = document.getElementById('downloadLink');
+        const sendProgressContainer = document.getElementById('sendProgressContainer');
+        const sendProgressBar = document.getElementById('sendProgressBar');
+        const receiveProgressContainer = document.getElementById('receiveProgressContainer');
+        const receiveProgressBar = document.getElementById('receiveProgressBar');
+
+        // Initialize PeerJS
+        function initializePeer() {
+            // Create a peer with a random ID (will be replaced when generating code)
+            peer = new Peer({
+                host: '0.peerjs.com',
+                port: 443,
+                path: '/',
+                pingInterval: 5000
+            });
+
+            peer.on('open', (id) => {
+                console.log('PeerJS connected with ID:', id);
+            });
+
+            peer.on('error', (err) => {
+                console.error('PeerJS error:', err);
+                uploadStatus.textContent = 'Connection error: ' + err.message;
+                downloadStatus.textContent = 'Connection error: ' + err.message;
+            });
+
+            // Handle incoming data connections
+            peer.on('connection', (connection) => {
+                conn = connection;
+                setupConnectionEvents(conn);
+                downloadStatus.textContent = 'Sender connected! Waiting for file...';
+            });
+        }
+
+        // Format file size
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Handle file selection
+        fileUpload.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                fileToSend = file;
+                fileInfo.innerHTML = `
+                    <strong>Selected File:</strong> ${file.name}<br>
+                    <strong>Type:</strong> ${file.type || 'Unknown'}<br>
+                    <strong>Size:</strong> ${formatFileSize(file.size)}
+                `;
+                fileInfo.style.display = 'block';
+                generateCodeBtn.disabled = false;
+                uploadStatus.textContent = 'Ready to generate share code';
+            } else {
+                fileInfo.style.display = 'none';
+                generateCodeBtn.disabled = true;
+                uploadStatus.textContent = 'Select a file to begin';
+            }
+        });
+
+        // Enable connect button when code is entered
+        codeInput.addEventListener('input', function() {
+            connectBtn.disabled = this.value.length !== 6;
+        });
+
+        // Generate code and set up connection as sender
+        generateCodeBtn.addEventListener('click', function() {
+            if (!fileToSend) {
+                uploadStatus.textContent = 'Please select a file first.';
+                return;
+            }
+
+            const code = generateSimpleCode(6);
+            codeDisplay.textContent = code;
+            codeDisplay.classList.remove('hidden');
+            generateCodeBtn.disabled = true;
+            fileUpload.disabled = true;
+            uploadStatus.textContent = 'Waiting for receiver to connect...';
+
+            // Reinitialize peer with our code as ID
+            peer.destroy();
+            peer = new Peer(code, {
+                host: '0.peerjs.com',
+                port: 443,
+                path: '/',
+                pingInterval: 5000
+            });
+
+            peer.on('open', (id) => {
+                console.log('Sender ready with ID:', id);
+            });
+
+            peer.on('connection', (connection) => {
+                conn = connection;
+                setupConnectionEvents(conn);
+                uploadStatus.textContent = 'Receiver connected! Preparing to send file...';
+                sendFileMetadata();
+            });
+        });
+
+        // Connect to sender using code
+        connectBtn.addEventListener('click', function() {
+            const code = codeInput.value.trim();
+            if (code.length !== 6) {
+                downloadStatus.textContent = 'Please enter a valid 6-digit code.';
+                return;
+            }
+
+            connectBtn.disabled = true;
+            codeInput.disabled = true;
+            downloadStatus.textContent = 'Connecting to sender...';
+
+            // Connect to the sender's peer ID
+            conn = peer.connect(code, {
+                reliable: true,
+                serialization: 'none'
+            });
+
+            setupConnectionEvents(conn);
+        });
+
+        // Set up connection events
+        function setupConnectionEvents(connection) {
+            connection.on('open', () => {
+                console.log('Connection established');
+                if (fileToSend) {
+                    uploadStatus.textContent = 'Connected to receiver!';
+                } else {
+                    downloadStatus.textContent = 'Connected to sender! Waiting for file...';
+                }
+            });
+
+            connection.on('data', (data) => {
+                if (typeof data === 'string') {
+                    // Handle metadata or control messages
+                    try {
+                        const message = JSON.parse(data);
+                        if (message.type === 'metadata') {
+                            handleFileMetadata(message);
+                        } else if (message.type === 'end') {
+                            completeFileDownload();
+                        }
+                    } catch (e) {
+                        console.error('Error parsing message:', e);
+                    }
+                } else {
+                    // Handle binary data (file chunks)
+                    receiveFileChunk(data);
+                }
+            });
+
+            connection.on('close', () => {
+                console.log('Connection closed');
+                if (fileToSend) {
+                    uploadStatus.textContent = 'Connection closed by receiver';
+                } else {
+                    downloadStatus.textContent = 'Connection closed by sender';
+                }
+            });
+
+            connection.on('error', (err) => {
+                console.error('Connection error:', err);
+                if (fileToSend) {
+                    uploadStatus.textContent = 'Connection error: ' + err.message;
+                } else {
+                    downloadStatus.textContent = 'Connection error: ' + err.message;
+                }
+            });
+        }
+
+        // Generate a simple code (not cryptographically secure)
+        function generateSimpleCode(length) {
+            const chars = '0123456789';
+            let result = '';
+            for (let i = 0; i < length; i++) {
+                result += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return result;
+        }
+
+        // Send file metadata to receiver
+        function sendFileMetadata() {
+            fileMetaData = {
+                type: 'metadata',
+                name: fileToSend.name,
+                size: fileToSend.size,
+                mimeType: fileToSend.type,
+                lastModified: fileToSend.lastModified
+            };
+
+            conn.send(JSON.stringify(fileMetaData));
+            uploadStatus.textContent = 'Sending file...';
+            sendProgressContainer.style.display = 'block';
+            totalChunks = Math.ceil(fileToSend.size / chunkSize);
+            currentChunk = 0;
+
+            // Start sending file chunks
+            sendNextChunk();
+        }
+
+        // Send next chunk of the file
+        function sendNextChunk() {
+            if (!fileReader && currentChunk === 0) {
+                fileReader = new FileReader();
+                fileReader.onload = (e) => {
+                    const chunk = e.target.result;
+                    conn.send(chunk);
+                    currentChunk++;
+                    
+                    // Update progress
+                    const progress = Math.min(100, Math.round((currentChunk / totalChunks) * 100));
+                    sendProgressBar.style.width = progress + '%';
+                    sendProgressBar.textContent = progress + '%';
+                    
+                    if (currentChunk < totalChunks) {
+                        setTimeout(sendNextChunk, 0); // Small delay to prevent UI freeze
+                    } else {
+                        // File transfer complete
+                        conn.send(JSON.stringify({ type: 'end' }));
+                        uploadStatus.textContent = 'File sent successfully!';
+                        sendProgressBar.style.backgroundColor = '#2e7d32';
+                    }
+                };
+            }
+            
+            const start = currentChunk * chunkSize;
+            const end = Math.min(fileToSend.size, start + chunkSize);
+            const slice = fileToSend.slice(start, end);
+            fileReader.readAsArrayBuffer(slice);
+        }
+
+        // Handle incoming file metadata
+        function handleFileMetadata(metadata) {
+            receivedChunks = [];
+            receivingFileSize = metadata.size;
+            receivedSize = 0;
+            fileMetaData = metadata;
+            
+            downloadStatus.textContent = `Receiving file: ${metadata.name} (${formatFileSize(metadata.size)})`;
+            receiveProgressContainer.style.display = 'block';
+            receiveProgressBar.textContent = '0%';
+        }
+
+        // Handle incoming file chunks
+        function receiveFileChunk(chunk) {
+            receivedChunks.push(chunk);
+            receivedSize += chunk.byteLength;
+            
+            // Update progress
+            const progress = Math.min(100, Math.round((receivedSize / receivingFileSize) * 100));
+            receiveProgressBar.style.width = progress + '%';
+            receiveProgressBar.textContent = progress + '%';
+        }
+
+        // Complete file download and create download link
+        function completeFileDownload() {
+            // Combine all chunks into a single Blob
+            const blob = new Blob(receivedChunks, { type: fileMetaData.mimeType });
+            const url = URL.createObjectURL(blob);
+            
+            // Create download link
+            downloadLink.href = url;
+            downloadLink.download = fileMetaData.name;
+            downloadLink.textContent = `Download ${fileMetaData.name}`;
+            downloadLink.style.display = 'inline-block';
+            
+            downloadStatus.textContent = 'File received successfully!';
+            receiveProgressBar.style.backgroundColor = '#2e7d32';
+        }
+
+        // Initialize the app
+        initializePeer();
+    </script>
+</body>
+</html>
